@@ -1,0 +1,295 @@
+application:
+  configuration:
+    input.image: { ami: "us-west-1/ami-33c1ca76", user: "root",          type: "linux",   hw: "m3.large" }
+    input.recipe-url: "https://qubell-starter-kit-artifacts.s3.amazonaws.com/qubell-bazaar/component-oracle-db-cookbooks-stable-99999.tar.gz"
+    input.db-port: 1521
+    input.db-sid: ORCL
+    input.db-sys-password: password
+  interfaces:
+    app-meta:
+      application-pic: bind(metadata#app-meta.application-pic)
+    input:
+      image: bind(database#input.image)
+      recipe-url: bind(database#input.recipe-url)
+      db-port: bind(database#input.listener-port)
+      db-sid: bind(database#input.db-sid)
+      db-sys-password: bind(database#input.db-sys-password)
+    oracledb:
+      "*": bind(database#result.*, database#actions.*)
+  bindings:
+    - [ environment, database ]
+  components:
+    environment:
+      type: reference.Service
+      interfaces:
+        properties:
+          oracle_db_ee_install:
+            type: publish-signal(map<string, object>)
+            name: Oracle DB installation disks
+
+    database:
+      type: workflow.Instance
+      interfaces:
+        input:
+          image:
+            type: configuration(map<string, string>)
+            name: Compatible AMI
+            suggestions:
+              "CentOS 6 (us-west-1)": { ami: "us-west-1/ami-33c1ca76", user: "root",          type: "linux",   hw: "m3.large" }
+              "CentOS 6 (us-east-1)": { ami: "us-east-1/ami-bc8131d4", user: "root",          type: "linux",   hw: "m3.large" }
+              "CentOS 6 (us-west-2)": { ami: "us-west-2/ami-a9de9c99", user: "root",          type: "linux",   hw: "m3.large" }
+          instance-prefix:
+            type: configuration(string)
+            name: AWS tag prefix
+          recipe-url:
+            type: configuration(string)
+            name: Chef recipie URL
+          listener-port:
+            type: configuration(int)
+            name: Listener port
+          db-sid:
+            type: configuration(string)
+            name: Database SID
+          db-sys-password:
+            type: configuration(string)
+            name: Database SYS password
+        actions:
+          create-user:
+            type: receive-command(map<string, object> creds => map<string, object> creds)
+            name: Create schema/user
+            arguments:
+              creds:
+                name: Credentials to create
+          delete-user:
+            type: receive-command(map<string, object> creds)
+            name: Delete schema/user
+            arguments:
+              creds:
+                name: Credentials to delete
+          file-query:
+            type: receive-command(map<string, object> creds, list<string> url)
+            name: Run SQL file
+            arguments:
+              creds:
+                name: Credentials
+              url:
+                name: SQL file URL
+          sql-query:
+            type: receive-command(map<string, object> creds, list<string> code)
+            name: Run SQL code
+            arguments:
+              creds:
+                name: Credentials
+              code:
+                name: SQL code
+          impdp:
+            type: receive-command(string dmp-url, string dmp-params)
+            name: Import DataPump dump
+            arguments:
+              dmp-url:
+                name: DataPump dump URL
+              dmp-params:
+                name: impdp parameters
+        result:
+          db-host: { type: publish-signal(string), name: "Database Listener IP" }
+          db-port: { type: publish-signal(int), name: "Database Listener port" }
+          db-sid: { type: publish-signal(string), name: "Database SID" }
+        props:
+          oracle_db_ee_install: consume-signal(map<string, object>)
+      required: [ props ]
+      configuration:
+        input.instance-prefix: "DB"
+        configuration.workflows:
+          launch:
+            steps:
+              - getSignals:
+                  action: getSignals
+                  output:
+                    env: result
+              - provision:
+                  action: provisionVms
+                  parameters:
+                    blockDeviceMapping:
+                      "/dev/xvdb":
+                        ebs:
+                          volumeSize: 30
+                    hardwareId: "{$.image.hw}"
+                    imageId: "{$.image.ami}"
+                    vmIdentity: "{$.image.user}"
+                    jcloudsNodeNamePrefix: "{$.instance-prefix}"
+                    roleName: default
+                  output:
+                    ips: ips
+              - mountStore:
+                  action: execrun
+                  precedingPhases: [ provision ]
+                  parameters:
+                    roles: [ default ]
+                    command:
+                      - |
+                        set -e
+                        if ! grep " /opt " /etc/fstab ; then
+                          mke2fs /dev/xvdb
+                          mkdir -p /opt
+                          echo "/dev/xvdb /opt ext4 defaults 0 0" >> /etc/fstab
+                        fi
+                        mount -a
+                        if ! grep "/opt/swap" /etc/fstab ; then
+                          dd if=/dev/zero of=/opt/swap bs=1024000 count=1024
+                          mkswap /opt/swap
+                          echo "/opt/swap swap swap defaults 0 0" >> /etc/fstab
+                        fi
+                        swapon -a
+              - getHostname:
+                  action: execrun
+                  precedingPhases: [ provision ]
+                  parameters:
+                    roles: [ default ]
+                    command:
+                      - |
+                        PUBLIC=`curl -s http://169.254.169.254/latest/meta-data/public-hostname`
+                        PRIVATE=`curl -s http://169.254.169.254/latest/meta-data/hostname`
+                        HOST=$${{PUBLIC:-$$PRIVATE}}
+                        echo -n $$HOST
+                  output:
+                    dns: stdout
+              - installDbSoftware:
+                  action: chefsolo
+                  precedingPhases: [ mountStore, getSignals ]
+                  parameters:
+                    version: "11.16.2"
+                    roles: [ default ]
+                    recipeUrl: "{$.recipe-url}"
+                    runList: [ "recipe[oracle-database::ee]" ]
+                    jattrs:
+                      oracle:
+                        listener:
+                          port: "{$.listener-port}"
+                        ee:
+                          install: "{$.env.props.oracle_db_ee_install}"
+              - createDb:
+                  action: chefsolo
+                  precedingPhases: [ installDbSoftware ]
+                  parameters:
+                    roles: [ default ]
+                    recipeUrl: "{$.recipe-url}"
+                    runList: [ "recipe[oracle-database::dbca]" ]
+                    jattrs:
+                      oracle:
+                        db:
+                          sid: "{$.db-sid}"
+                          sys_password: "{$.db-sys-password}"
+            return:
+              db-host:
+                value: "{$.dns[*][0]}"
+              db-port:
+                value: "{$.listener-port}"
+              db-sid:
+                value: "{$.db-sid}"
+
+          create-user:
+            steps:
+              - create:
+                  action: chefsolo
+                  parameters:
+                    version: "11.16.2"
+                    roles: [ default ]
+                    recipeUrl: "{$.recipe-url}"
+                    runList: [ "recipe[oracle-database::create_user]" ]
+                    jattrs:
+                      oracle:
+                        db:
+                          sid: "{$.db-sid}"
+                          sys_password: "{$.db-sys-password}"
+                        schema: "{$.creds}"
+                  output:
+                    chefout: chefState
+            return:
+              creds:
+                value:
+                  username: "{$.chefout.*.oracle.schema.username[0]}"
+                  password: "{$.chefout.*.oracle.schema.password[0]}"
+
+          delete-user:
+            steps:
+              - create:
+                  action: chefsolo
+                  parameters:
+                    version: "11.16.2"
+                    roles: [ default ]
+                    recipeUrl: "{$.recipe-url}"
+                    runList: [ "recipe[oracle-database::delete_user]" ]
+                    jattrs:
+                      oracle:
+                        db:
+                          sid: "{$.db-sid}"
+                          sys_password: "{$.db-sys-password}"
+                        schema: "{$.creds}"
+
+          file-query:
+            steps:
+              - query:
+                  action: chefsolo
+                  parameters:
+                    version: "11.16.2"
+                    roles: [ default ]
+                    recipeUrl: "{$.recipe-url}"
+                    runList: [ "recipe[oracle-database::file_query]" ]
+                    jattrs:
+                      oracle:
+                        db:
+                          sid: "{$.db-sid}"
+                          sys_password: "{$.db-sys-password}"
+                        sql:
+                          username: "{$.creds.username}"
+                          password: "{$.creds.password}"
+                          url: "{$.url}"
+
+          sql-query:
+            steps:
+              - query:
+                  action: chefsolo
+                  parameters:
+                    version: "11.16.2"
+                    roles: [ default ]
+                    recipeUrl: "{$.recipe-url}"
+                    runList: [ "recipe[oracle-database::sql_query]" ]
+                    jattrs:
+                      oracle:
+                        db:
+                          sid: "{$.db-sid}"
+                          sys_password: "{$.db-sys-password}"
+                        sql:
+                          username: "{$.creds.username}"
+                          password: "{$.creds.password}"
+                          code: "{$.code}"
+
+          impdp:
+            steps:
+              - import:
+                  action: chefsolo
+                  parameters:
+                    version: "11.16.2"
+                    roles: [ default ]
+                    recipeUrl: "{$.recipe-url}"
+                    runList: [ "recipe[oracle-database::impdp]" ]
+                    jattrs:
+                      oracle:
+                        db:
+                          sid: "{$.db-sid}"
+                          sys_password: "{$.db-sys-password}"
+                        dp:
+                          url: "{$.dmp-url}"
+                          params: "{$.dmp-params}"
+
+    metadata:
+      type: cobalt.common.Constants
+      interfaces:
+        app-meta:
+          application-pic: { type: "publish-signal(map<string,object>)", name: "Logo" }  
+      configuration:
+        configuration.values:
+          app-meta.application-pic:
+            large: "https://qubell-images.s3.amazonaws.com/oracle-db.png"
+            small: "https://qubell-images.s3.amazonaws.com/oracle-db-small.png"
+            small-height: 48
