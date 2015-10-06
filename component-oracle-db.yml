@@ -1,7 +1,7 @@
 application:
   configuration:
     input.image: { ami: "us-west-1/ami-33c1ca76", user: "root",          type: "linux",   hw: "m3.large" }
-    input.recipe-url: "https://qubell-starter-kit-artifacts.s3.amazonaws.com/qubell-bazaar/component-oracle-db-cookbooks-stable-fa7b45d.tar.gz"
+    input.recipe-url: "https://qubell-starter-kit-artifacts.s3.amazonaws.com/qubell-bazaar/component-oracle-db-cookbooks-stable-b1552db.tar.gz"
     input.db-port: 1521
     input.db-sid: ORCL
     input.db-sys-password: password
