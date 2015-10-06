@@ -153,9 +153,20 @@ application:
                         echo -n $$HOST
                   output:
                     dns: stdout
+              - setHostname:
+                  action: execrun
+                  precedingPhases: [ provision ]
+                  parameters:
+                    roles: [ default ]
+                    command:
+                      - |
+                        LOCAL=`curl -s http://169.254.169.254/latest/meta-data/local-hostname`
+                        LOCAL_SHORT=`echo $$LOCAL | cut -d. -f1`
+                        LOCAL_IPV4=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4`
+                        hostname -i || echo "$$LOCAL_IPV4 $$LOCAL $$LOCAL_SHORT" >> /etc/hosts
               - installDbSoftware:
                   action: chefsolo
-                  precedingPhases: [ mountStore, getSignals ]
+                  precedingPhases: [ mountStore, getSignals, setHostname ]
                   parameters:
                     version: "11.16.2"
                     roles: [ default ]
